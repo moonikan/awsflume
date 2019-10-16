@@ -1,0 +1,16 @@
+# Log => fafka => storm
+
+# Log generation
+java -cp bigdata.loggen-1.0.jar bigdata.loggen.RealtimeLogMain 20170831 100
+
+# Kafka
+# 1.topic »ı¼º
+/usr/hdp/current/kafka-broker/bin/kafka-topics.sh --create --zookeeper lake1.bigdata:2181 --replication-factor 1 --partitions 1 --topic Log-Topic
+
+# Storm jar
+storm jar bigdata.storm-1.0.jar bigdata.storm.RealtimeStormTopology realtimeLog
+
+# Redis
+
+/etc/redis/redis.conf
+bind 127.0.0.1 => bind 0.0.0.0
