@@ -1,0 +1,106 @@
+//Example Data
+Driver Info,CarNum,AccStep,BrkStep,WheelStep,DirLightStep,speed,AreaNum
+20171003000328,W0008,1,0,L3,L,87,B03
+20171003000318,E0054,0,0,F,N,64,E01
+20171003000328,W0008,1,0,L3,L,120,B03
+20171003000328,W0008,1,0,L3,L,240,B03
+
+
+/usr/hdp/2.6.1.0-129/spark2/bin/spark-shell --packages  org.apache.spark:spark-sql-kafka-0-10_2.11:2.3.2,com.hortonworks:shc-core:1.1.0-2.1-s_2.11 --repositories http://repo.hortonworks.com/content/groups/public/  --jars shc-core-1.1.2-2.1-s_2.11-SNAPSHOT.jar
+/usr/hdp/2.6.5.0-292/spark2/bin/pyspark --packages  org.apache.spark:spark-sql-kafka-0-10_2.11:2.3.2
+
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import spark.implicits._
+import java.sql.Timestamp
+import org.apache.hadoop.hbase._
+
+val df = spark.
+readStream.
+format("kafka"). 
+option("sep", ",").
+option("subscribe", "Log-Topic").
+option("kafka.bootstrap.servers", "instance-1.us-central1-a.c.crafty-acumen-253201.internal:6667").
+load.
+withColumn("current_timestamp", current_timestamp)
+
+val df2 = df.selectExpr("CAST(value AS STRING)","timestamp").as[(String,Timestamp)].
+  selectExpr(
+    "timestamp",
+    "split(value, ',')[0] as TS",
+    "split(value, ',')[1] as carno",
+    "split(value, ',')[2] as accstep",
+    "split(value, ',')[3] as brkstep",
+    "split(value, ',')[4] as wheelstep",
+    "split(value, ',')[5] as lightstep",
+    "split(value, ',')[6] as speed",
+    "split(value, ',')[7] as areano")
+
+val windowedDF = df2.
+  //withWatermark("timestamp", "30 seconds").
+  groupBy(
+    window($"timestamp", "30 seconds", "30 seconds"),
+    $"carno"
+  ).
+  agg(avg("speed").alias("avg_speed")).
+  where("avg_speed > 30").
+  selectExpr("carno", "cast(avg_speed as string) avg_speed").
+   withColumn("current_timestamp", date_format(current_timestamp, "yMd:hhmmss")).
+   withColumn("car_no", concat_ws("-",$"carno",$"current_timestamp"))
+
+
+/*
+windowedDF.writeStream.
+  format("console").
+  option("truncate", false).
+  outputMode(OutputMode.Complete()).
+  start.
+  awaitTermination()
+*/
+
+import org.apache.spark.sql.streaming.OutputMode
+import scala.concurrent.duration._
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.streaming.{OutputMode, Trigger}
+import org.apache.spark.sql.streaming._
+
+
+val catalog = s"""
+{
+    "table":
+    {
+        "namespace": "default",
+        "name": "hbase_stream"
+    },
+    "rowkey": "car_no",
+    "columns":
+    {
+        "car_no": {"cf": "rowkey", "col": "car_no", "type": "string"},
+        "avg_speed": {"cf": "cf1", "col": "avg_speed", "type": "string"},
+        "current_timestamp": {"cf": "cf1", "col": "current_timestamp", "type": "string"},
+        "carno": {"cf": "cf1", "col": "carno", "type": "string"}
+    }
+}""".stripMargin
+
+windowedDF.
+   writeStream.
+   queryName("hbase writer").
+   format("org.apache.spark.sql.execution.datasources.hbase.HBaseSinkProvider").
+   option("checkpointLocation", "/tmp/checkpoint").
+   option("hbasecat", catalog).
+   outputMode(OutputMode.Complete()).
+   trigger(ProcessingTime(10.seconds)).
+   start
+
+
+get  "hbase_stream", "W0008-2018109:123850"
+
+%jdbc(phoenix)
+create view "hbase_stream" (rowkey varchar primary key, "cf1"."car_no" varchar, "cf1"."avg_speed" varchar, "cf1"."current_timestamp" varchar, "cf1"."carno" varchar)
+
+
+
+%jdbc(phoenix)
+select * from "hbase_stream"
